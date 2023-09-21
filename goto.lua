@@ -1,7 +1,7 @@
 local mapFileName = ".gotomapdata"
 local configFileName = ".gotoconfig"
 
-local pathFindingTimeout = 5 
+local pathFindingTimeout = 20 
 local GPSLocateTimeout = 5 
 
 ------------
@@ -218,6 +218,8 @@ function queueComparison(a, b)
 end
 
 -- returns stack of movements to reach goal, returns nil on pathfind failure
+-- Only operates with relative positions
+-- TODO: Inform user if timeout or unreachable
 function Navigation:aStar(start, startDir, goal)
     local visited = {}
     local costs = {}
@@ -337,6 +339,7 @@ function Navigation:moveto(goal)
     if self:isBlockedRelPos(goal) then return false end
 
     while true do
+        relPos = self.mov.currentPos-self.origin
         local steps = self:aStar(relPos, self.mov.facing, goal)
 
         if steps == nil then
@@ -578,7 +581,7 @@ DeliveryManager = {
     fuelDir = "left",-- string of inventory direction
 }
 
-function DeliveryManager:new(nav,)
+function DeliveryManager:new(nav)
     o = {}
     setmetatable(o, self)
     self.__index = self
