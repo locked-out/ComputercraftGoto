@@ -6,8 +6,8 @@ local GPSLocateTimeout = 5
 
 ------------
 
-local sensor = peripheral.wrap("left")
-local modem = peripheral.wrap("right")
+local sensor = peripheral.find("turtlesensorenvironment")
+local modem = peripheral.find("modem")
 
 local cardinalDirections = {
     vector.new(1, 0, 0),
@@ -68,6 +68,8 @@ function Stack:pop()
 end
 
 function Stack:isEmpty() return self.n == 0 end
+
+function Stack:nItems() return self.n end
 
 PriorityQueue = {
     heap = {},
@@ -232,7 +234,7 @@ function Navigation:aStar(start, startDir, goal)
     local sToGoal = goal - start
 
     local q = PriorityQueue:new(queueComparison)
-    q:enqueue({fval=(2 * (math.abs(sToGoal.x) + math.abs(sToGoal.y) + math.abs(sToGoal.z))), pos=start, dir=startDir})
+    q:enqueue({fval=(math.abs(sToGoal.x) + math.abs(sToGoal.y) + math.abs(sToGoal.z)), pos=start, dir=startDir})
 
     local timeLimit = (os.time() + (pathFindingTimeout/50)) % 24
     local iteration = 0 
@@ -270,12 +272,12 @@ function Navigation:aStar(start, startDir, goal)
                 else
                     -- No need to turn
                     local neighbourIndex = self:posDirToIndex(neighbour, currentDir)
-                    local newCost = costs[index] + 2
+                    local newCost = costs[index] + 1
                     if costs[neighbourIndex] == nil or newCost < costs[neighbourIndex] then
                         costs[neighbourIndex] = newCost
         
                         local toGoal = goal - neighbour
-                        local fval = newCost + 2 * (math.abs(toGoal.x) + math.abs(toGoal.y) + math.abs(toGoal.z))
+                        local fval = newCost + math.abs(toGoal.x) + math.abs(toGoal.y) + math.abs(toGoal.z)
                         q:enqueue({fval=fval, pos=neighbour, dir=currentDir})
                         prev[neighbourIndex] = index
                     end
@@ -591,6 +593,16 @@ function DeliveryManager:new(nav)
 end
 
 function main()
+
+    if not sensor then
+        print("Could not find an attached sensor. This program requires an attached openperipherals sensor. Craft one together with this turtle.")
+        return
+    end
+
+    if not modem then
+        print("Could not find an attached modem. This program requires an attached wirless modem. Craft one together with this turtle.")
+        return
+    end
 
     local x,y,z = gps.locate(5)
 
