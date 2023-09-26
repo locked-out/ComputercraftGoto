@@ -1,0 +1,571 @@
+local protocolName = "aeDeliverProtocol"
+local serverHostName = "aeDeliverServer"
+
+-- from http://lua-users.org/wiki/InheritanceTutorial
+-- Create a new class that inherits from a base class
+--
+function CreateClass(...)
+    -- "cls" is the new class
+    local cls, bases = {}, {...}
+    -- copy base class contents into the new class
+    for i, base in ipairs(bases) do
+        for k, v in pairs(base) do
+            cls[k] = v
+        end
+    end
+    -- set the class's __index, and start filling an "is_a" table that contains this class and all of its bases
+    -- so you can do an "instance of" check using my_instance.is_a[MyClass]
+    cls.__index, cls.is_a = cls, {[cls] = true}
+    for i, base in ipairs(bases) do
+        for c in pairs(base.is_a) do
+            cls.is_a[c] = true
+        end
+        cls.is_a[base] = true
+    end
+    -- the class's __call metamethod
+    setmetatable(cls, {__call = function (c, ...)
+        local instance = setmetatable({}, c)
+        -- run the init method if it's there
+        local init = instance._init
+        if init then init(instance, ...) end
+        return instance
+    end})
+    -- return the new class table, that's ready to fill with methods
+    return cls
+end
+
+local function protectedSend(serverID, message, protocol) 
+    if not rednet.send(serverID, message, protocol) then
+        error("Failed to send '"..message.type.."' message to device "..serverID)
+    end
+end
+
+
+--[[ CLASSES:
+connection
+    serverConnection
+    clientConnection
+        turtleConnection
+        playerConnection
+
+]]--
+
+Connection = CreateClass(nil)
+Connection.TurtleMovementTargets = {
+    PLAYER = "PLAYER",
+    HOME = "HOME",
+    PICKUP = "PICKUP", 
+    FUELDEPOT = "FUELDEPOT"
+}
+
+function Connection:_init(otherID)
+    self.otherID = otherID
+end
+
+function Connection:getOtherID()
+    return self.otherID
+end
+
+ServerConnection = CreateClass(Connection)
+
+-- Attempts to connect to a server and returns a ServerConnection instance on success
+function ServerConnection.begin(isTurtle)
+    local serverID = rednet.lookup(protocolName, serverHostName)
+
+    if not serverID then
+        error("Could not find a AE Delivery server on local network with hostname '" 
+        ..serverHostName.."' on protocol '"..protocolName.."'") 
+    end
+
+    local connection = ServerConnection(serverID)
+
+    local request = {
+        type = "GREET",
+        isTurtle = isTurtle,
+    }
+
+    protectedSend(serverID, request, protocolName)
+
+    connection:waitForAck()
+
+    return connection
+end
+
+-- Can throw error on response timeout
+function ServerConnection:waitForResponse()
+    -- TODO: Use a variable for timeout
+    local timeout = os.setTimer(5)
+    while true do
+        local event, r1, r2, r3 = os.pullEvent()
+        if event == "rednet_message" then
+            local senderID, message, protocol = r1,r2,r3
+            if senderID == self.otherID and protocol == protocolName then
+                if message == nil then
+                    error("Received empty response from device "..self.otherID)
+                end
+                return message
+            end
+        elseif event == "timer" then
+            local timer = r1
+            if timer == timeout then
+                error("No response received from device "..self.otherID)
+            end
+        end
+    end
+end
+
+-- Can throw error if respone is not ACK
+function ServerConnection:waitForAck()
+    local response = self:waitForResponse()
+
+    if response.type ~= "ACK" then
+        error("Expected ACK response but received response of type ".. response.type)
+    end
+end
+
+function ServerConnection:sendState(state)
+    local request = {
+        type = "TURTLESTATE", 
+        state = state,
+    }
+
+    protectedSend(self.otherID, request, protocolName) 
+    self:waitForAck()
+end
+
+function ServerConnection:sendIdleState()
+    local state = {type = "IDLE"}
+    self:sendState(state)
+end
+
+function ServerConnection:sendWaitingState()
+    local state = {type = "WAITING"}
+    self:sendState(state)
+end
+
+-- Target is one of PLAYER, HOME, PICKUP from Conenction.TurtleMovementTargets
+function ServerConnection:sendMovingState(dest, eta, target)
+    local state = {
+        type = "MOVING",
+        dest = dest,
+        eta = eta,
+        target = target,
+    }
+
+    self:sendState(state)
+end
+
+local function handleUpdateList(
+    updateList,
+    playerPosCallback,
+    areaResetCallback,
+    areaBlockCallback,
+    deliverCallback,
+    waitCallback
+)
+    local callBacks = {
+        PLAYERPOS = playerPosCallback,
+        AREARESET = areaResetCallback,
+        AREABLOCK = areaBlockCallback,
+        DELIVER = deliverCallback,
+        WAIT = waitCallback,
+    }
+
+    local callBackArgs = {
+        PLAYERPOS = {"pos"},
+        AREARESET = {"corner1", "corner2"},
+        AREABLOCK = {"corner1", "corner2"},
+        DELIVER = {"item", "amount"},
+        WAIT = {"duration"}
+    }
+
+    for _, update in ipairs(updateList) do
+        if callBacks[update.type] then
+            local args = {}
+            for _, argName in ipairs(callBackArgs[update.type]) do
+                table.insert(args, update[argName])
+            end
+
+            callBacks[update.type](table.unpack(args))
+        end
+    end
+
+end
+
+function ServerConnection:requestAllUpdates(
+    playerPosCallback,
+    areaResetCallback,
+    areaBlockCallback,
+    deliverCallback,
+    waitCallback
+)
+    local request = {
+        type = "GETALLUPDATES",
+    }
+
+    protectedSend(self.otherID, request, protocolName)
+
+    local response = self:waitForResponse()
+    if response.type ~= "UPDATELIST" then
+        error("Expected response of type UPDATELIST but got type "..response.type)
+    end
+
+    handleUpdateList(
+        response.updates,
+        playerPosCallback,
+        areaResetCallback,
+        areaBlockCallback,
+        deliverCallback,
+        waitCallback
+    )
+end
+
+function ServerConnection:requestPathingUpdates(
+    playerPosCallback,
+    areaResetCallback,
+    areaBlockCallback,
+    deliverCallback,
+    waitCallback,
+    getPlayer
+)
+    local request = {
+        type = "GETPATHINGUPDATES",
+        getPlayer = getPlayer,
+    }
+
+    protectedSend(self.otherID, request, protocolName)
+
+    local response = self:waitForResponse()
+    if response.type ~= "UPDATELIST" then
+        error("Expected response of type UPDATELIST but got type "..response.type)
+    end
+
+    handleUpdateList(
+        response.updates,
+        playerPosCallback,
+        areaResetCallback,
+        areaBlockCallback,
+        deliverCallback,
+        waitCallback
+    )
+end
+
+
+function ServerConnection:sendPlayerPos(pos)
+    local request = {
+        type = "PLAYERPOS",
+        pos = pos,
+    }
+    protectedSend(self.otherID, request, protocolName)
+    self:waitForAck()
+end
+
+function ServerConnection:resetArea(corner1, corner2) 
+    local request = {
+        type = "AREARESET",
+        corner1 = corner1,
+        corner2 = corner2,
+    }
+    protectedSend(self.otherID, request, protocolName)
+    self:waitForAck()
+end
+
+function ServerConnection:blockArea(corner1, corner2) 
+    local request = {
+        type = "AREABLOCK",
+        corner1 = corner1,
+        corner2 = corner2,
+    }
+    protectedSend(self.otherID, request, protocolName)
+    self:waitForAck()
+end
+
+function ServerConnection:changeBounds(corner1, corner2) 
+    local request = {
+        type = "AREARESET",
+        corner1 = corner1,
+        corner2 = corner2,
+    }
+    protectedSend(self.otherID, request, protocolName)
+    self:waitForAck()
+end
+
+function ServerConnection:itemLookup(name) 
+    local request = {
+        type = "ITEMLOOKUP",
+        name = name,
+    }
+    protectedSend(self.otherID, request, protocolName)
+    local response = self:waitForResponse()
+    if response.type ~= "ITEMMATCHES" then
+        error("Expected response of type ITEMMATCHES but got type "..response.type)
+    end
+    return response.matches
+end
+
+function ServerConnection:itemRequest(fingerprint, amount) 
+    local request = {
+        type = "ITEMLOOKUP",
+        fingerprint = fingerprint,
+        amount = amount
+    }
+    protectedSend(self.otherID, request, protocolName)
+    local response = self:waitForResponse()
+    if response.type ~= "ACKITEMREQUEST" then
+        error("Expected response of type ACKITEMREQUEST but got type "..response.type)
+    end
+    return response
+end
+
+
+
+ClientResponseHandler = CreateClass()
+ClientResponseHandler.requestTypes = {
+    -- Turtle Requests
+    TURTLESTATE = "responseHandlerTurtleState",
+    GETALLUPDATES = "responseHandlerGetAllUpdates",
+    GETPATHINGUPDATES = "responseHandlerGetPathingUpdates",
+
+    -- Player Requests
+    PLAYERPOS = "responseHandlerPlayerPos",
+    AREARESET = "responseHandlerAreaReset",
+    AREABLOCK = "responseHandlerAreaBlock",
+    ITEMLOOKUP = "responseHandlerItemLookup",
+    ITEMREQUEST = "responseHandlerItemRequest",
+    CHANGEBOUNDS = "responseHandlerChangeBounds",
+}
+
+ClientResponseHandler.expectedResponseTypes = {
+    -- Turtle Requests
+    responseHandlerTurtleState = "ACK",
+    responseHandlerGetAllUpdates = "UPDATELIST",
+    responseHandlerGetPathingUpdates = "UPDATELIST",
+
+    -- Player Requests
+    responseHandlerPlayerPos = "ACK",
+    responseHandlerAreaReset = "ACK",
+    responseHandlerAreaBlock = "ACK",
+    responseHandlerItemLookup = "ITEMMATCHES",
+    responseHandlerItemRequest = "ACKITEMREQUEST",
+    responseHandlerChangeBounds = "ACK",
+}
+
+ClientResponseHandler.responseHandlerArguments = {
+    -- Turtle Requests
+    responseHandlerTurtleState = {"state"},
+    responseHandlerGetAllUpdates = {},
+    responseHandlerGetPathingUpdates = {},
+
+    -- Player Requests
+    responseHandlerPlayerPos = {"pos"},
+    responseHandlerAreaReset = {"corner1", "corner2"},
+    responseHandlerAreaBlock = {"corner1", "corner2"},
+    responseHandlerItemLookup = {"name"},
+    responseHandlerItemRequest = {"item", "amount"},
+    responseHandlerChangeBounds = {"corner1", "corner2"},
+}
+
+function ClientResponseHandler:_init()
+    -- Turtle Requests
+    self.responseHandlerTurtleState = nil
+    self.responseHandlerGetAllUpdates = nil
+    self.responseHandlerGetPathingUpdates = nil
+
+    -- Player Requests
+    self.responseHandlerPlayerPos = nil
+    self.responseHandlerAreaReset = nil
+    self.responseHandlerAreaBlock = nil
+    self.responseHandlerItemLookup = nil
+    self.responseHandlerItemRequest = nil
+    self.responseHandlerChangeBounds = nil
+end
+
+ClientConnection = CreateClass(Connection)
+
+-- If a new incoming connection is a GREET'ing then return the new connection, else nil
+function ClientConnection.newIncomingConnection(senderID, request, protocol)
+    if protocol ~= protocolName then return nil end
+
+    if request and request.type == "GREET" then
+        if request.isTurtle == true then
+            return TurtleConnection(senderID)
+        elseif request.isTurtle == false then
+            return PlayerConnection(senderID)
+        end
+    end
+end
+
+
+function ClientConnection:isSender(senderID, protocol)
+    return protocol == protocolName and senderID == self.otherID
+end
+
+function ClientConnection:handleResponse(clientResponseHandler, request)
+    local handlerType = ClientResponseHandler.requestTypes[request.type]
+    if not handlerType then return end
+
+    local handler = clientResponseHandler[handlerType]
+    if not handler then
+        error("Missing handler for "..request.type..
+        " request! Add a handler to the ."..handlerType..
+        " field of your clientResponseHandler.")
+    end
+
+    local args = {}
+    local argNames = ClientResponseHandler.responseHandlerArguments[handlerType]
+    for _, argName in ipairs(argNames) do
+        table.insert(args, request[argName])
+    end    
+    
+    local response = handler(table.unpack(args))
+
+    local expectedResponseType = ClientResponseHandler.expectedResponseTypes[handlerType]  
+    if response.type ~= expectedResponseType then
+        error("Handler "..handlerType..
+        " should return a "..expectedResponseType..
+        " response, got a "..response.type)
+    end
+
+    protectedSend(self.otherID, response, protocolName)
+end
+
+function ClientConnection:makeResponseAck()
+    return {
+        type = "ACK"
+    }
+end
+
+TurtleConnection = CreateClass(ClientConnection)
+
+function TurtleConnection:makeResponseUpdateList(updates)
+    return {
+        type = "UPDATELIST",
+        updates = updates,
+    }
+end
+
+function TurtleConnection.makeUpdatePlayerPos(pos)
+    return {type = "PLAYERPOS", pos=pos}
+end
+
+function TurtleConnection.makeUpdateAreaReset(corner1, corner2)
+    return {type = "AREARESET", corner1 = corner1, corner2 = corner2}
+end
+
+function TurtleConnection.makeUpdateAreaBlock(corner1, corner2)
+    return {type = "AREABLOCK", corner1 = corner1, corner2 = corner2}
+end
+
+function TurtleConnection.makeUpdateDeliver(item, amount)
+    return {type = "DELIVER", item = item, amount = amount}
+end
+
+function TurtleConnection.makeUpdateWait(duration)
+    return {type = "WAIT", duration = duration}
+end
+
+function TurtleConnection:wake()
+    local request = {
+        type = "WAKE"
+    }
+    protectedSend(self.otherID, request, protocolName)
+end
+
+PlayerConnection = CreateClass(ClientConnection)
+
+function PlayerConnection:makeResponseItemMatchList(matches)
+    return {
+        type = "ITEMMATCHES",
+        matches = matches,
+    }
+end
+
+function PlayerConnection:makeResponseItemRequestConfirm(success, reason)
+    local response = {
+        type = "ACKITEMREQUEST",
+        success = success,
+    }
+    if not success then
+        response.reason = reason
+    end
+    return response
+end
+
+--[[
+Requests:
+    GREET -> ACK
+        isTurtle: boolean
+
+    -- sent by turtle
+    TURTLESTATE -> ACK
+        state: State structure
+    GETALLUPDATES -> UPDATELIST
+    GETPATHINGUPDATES -> UPDATELIST
+        getPlayer: bool     -- Whether player position is required
+
+
+    -- Sent by player
+    PLAYERPOS -> ACK
+        pos: Vector3
+    AREARESET -> ACK
+        corner1: Vector3
+        corner2: Vector3
+    AREABLOCK -> ACK
+        corner1: Vector3
+        corner2: Vector3
+    ITEMLOOKUP -> ITEMMATCHES
+        name: string
+    ITEMREQUEST -> ACKITEMREQUEST
+        item: fingerprint??
+        amount: item
+    CHANGEBOUNDS -> ACK
+        corner1: Vector3
+        corner2: Vector3
+    -- Sent by server to turtle?
+    WAKE
+
+
+Responses:
+    ACK - acknowledges a basic request, lack of ack means something is seriously wrong
+
+    ITEMMATCHES
+        matches: list of 
+            {
+                ...
+                owned: integer
+                craftable: bool
+            }
+
+    ACKITEMREQUEST
+        success: bool
+        reason: string  -- Reason for unsuccessful request
+
+
+    UPDATELIST
+        updates: list of possible updates
+            PLAYERPOS
+                pos
+            AREARESET
+                corner1: Vector3
+                corner2: Vector3
+            AREABLOCK
+                corner1: Vector3
+                corner2: Vector3
+            DELIVER -- Turtle has orders ready to be fullfilled
+                item: fingerprint?
+                amount: integer ??
+            WAIT -- Turtle should wait at pickup for more orders?
+                duration: number
+
+
+
+
+
+Turtle States:
+    IDLE
+    MOVING
+        dest: Vector3
+        eta: compare with os.clock()
+        target: "PLAYER", "HOME", "PICKUP", "FUELDEPOT"
+    WAITING - Waiting for items to arrive
+]]--
