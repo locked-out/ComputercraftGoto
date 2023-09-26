@@ -160,7 +160,7 @@ Navigation = {
 }
 
 function Navigation:new(mov, origin, bounds)
-   o = {}
+   local o = {}
    setmetatable(o, self)
    self.__index = self
    self.mov = mov
@@ -215,7 +215,7 @@ function Navigation:isBlockedAbsPos(abs)
     return self:isBlockedRelPos(abs - self.origin)
 end
 
-function queueComparison(a, b)
+local function queueComparison(a, b)
     return a.fval < b.fval
 end
 
@@ -464,7 +464,7 @@ Movement = {
 }
 
 function Movement:new(currentPos, facing)
-    o = {}
+    local o = {}
     setmetatable(o, self)
     self.__index = self
     self.currentPos = currentPos or vector.new(0, 0, 0)
@@ -583,16 +583,17 @@ DeliveryManager = {
     fuelDir = "left",-- string of inventory direction
 }
 
-function DeliveryManager:new(nav)
-    o = {}
+function DeliveryManager:new(nav, currentPos, facing)
+    local o = {}
     setmetatable(o, self)
     self.__index = self
+    self.nav = nav
     self.currentPos = currentPos or vector.new(0, 0, 0)
     self.facing = facing or vector.new(1, 0, 0)
     return o
 end
 
-function main()
+local function main()
 
     if not sensor then
         print("Could not find an attached sensor. This program requires an attached openperipherals sensor. Craft one together with this turtle.")
@@ -607,7 +608,7 @@ function main()
     local x,y,z = gps.locate(5)
 
     if (x == nil) then print("Could not reach any GPS towers") return end
-    position = vector.new(x,y,z)
+    local position = vector.new(x,y,z)
 
     local mov = Movement:new(position)
 
