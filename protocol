@@ -1,10 +1,8 @@
 local protocolName = "aeDeliverProtocol"
 local serverHostName = "aeDeliverServer"
 
--- from http://lua-users.org/wiki/InheritanceTutorial
--- Create a new class that inherits from a base class
---
-function CreateClass(...)
+-- https://stackoverflow.com/a/67831952
+local function CreateClass(...)
     -- "cls" is the new class
     local cls, bases = {}, {...}
     -- copy base class contents into the new class
@@ -34,12 +32,9 @@ function CreateClass(...)
     return cls
 end
 
-local function protectedSend(serverID, message, protocol) 
-    if not rednet.send(serverID, message, protocol) then
-        error("Failed to send '"..message.type.."' message to device "..serverID)
-    end
+function HostServer()
+    rednet.host("aeDeliverProtocol", "aeDeliverServer")
 end
-
 
 --[[ CLASSES:
 connection
@@ -84,7 +79,7 @@ function ServerConnection.begin(isTurtle)
         isTurtle = isTurtle,
     }
 
-    protectedSend(serverID, request, protocolName)
+    rednet.send(serverID, request, protocolName)
 
     connection:waitForAck()
 
@@ -94,12 +89,12 @@ end
 -- Can throw error on response timeout
 function ServerConnection:waitForResponse()
     -- TODO: Use a variable for timeout
-    local timeout = os.setTimer(5)
+    local timeout = os.startTimer(5)
     while true do
         local event, r1, r2, r3 = os.pullEvent()
         if event == "rednet_message" then
-            local senderID, message, protocol = r1,r2,r3
-            if senderID == self.otherID and protocol == protocolName then
+            local senderID, message, protocolChannel = r1,r2,r3
+            if senderID == self.otherID and protocolChannel == protocolName then
                 if message == nil then
                     error("Received empty response from device "..self.otherID)
                 end
@@ -129,7 +124,7 @@ function ServerConnection:sendState(state)
         state = state,
     }
 
-    protectedSend(self.otherID, request, protocolName) 
+    rednet.send(self.otherID, request, protocolName) 
     self:waitForAck()
 end
 
@@ -203,7 +198,7 @@ function ServerConnection:requestAllUpdates(
         type = "GETALLUPDATES",
     }
 
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
 
     local response = self:waitForResponse()
     if response.type ~= "UPDATELIST" then
@@ -233,7 +228,7 @@ function ServerConnection:requestPathingUpdates(
         getPlayer = getPlayer,
     }
 
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
 
     local response = self:waitForResponse()
     if response.type ~= "UPDATELIST" then
@@ -256,7 +251,7 @@ function ServerConnection:sendPlayerPos(pos)
         type = "PLAYERPOS",
         pos = pos,
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     self:waitForAck()
 end
 
@@ -266,7 +261,7 @@ function ServerConnection:resetArea(corner1, corner2)
         corner1 = corner1,
         corner2 = corner2,
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     self:waitForAck()
 end
 
@@ -276,7 +271,7 @@ function ServerConnection:blockArea(corner1, corner2)
         corner1 = corner1,
         corner2 = corner2,
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     self:waitForAck()
 end
 
@@ -286,7 +281,7 @@ function ServerConnection:changeBounds(corner1, corner2)
         corner1 = corner1,
         corner2 = corner2,
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     self:waitForAck()
 end
 
@@ -295,7 +290,7 @@ function ServerConnection:itemLookup(name)
         type = "ITEMLOOKUP",
         name = name,
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     local response = self:waitForResponse()
     if response.type ~= "ITEMMATCHES" then
         error("Expected response of type ITEMMATCHES but got type "..response.type)
@@ -309,7 +304,7 @@ function ServerConnection:itemRequest(fingerprint, amount)
         fingerprint = fingerprint,
         amount = amount
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
     local response = self:waitForResponse()
     if response.type ~= "ACKITEMREQUEST" then
         error("Expected response of type ACKITEMREQUEST but got type "..response.type)
@@ -321,6 +316,7 @@ end
 
 ClientResponseHandler = CreateClass()
 ClientResponseHandler.requestTypes = {
+    GREET = "responseHandlerGreet",
     -- Turtle Requests
     TURTLESTATE = "responseHandlerTurtleState",
     GETALLUPDATES = "responseHandlerGetAllUpdates",
@@ -336,6 +332,7 @@ ClientResponseHandler.requestTypes = {
 }
 
 ClientResponseHandler.expectedResponseTypes = {
+    responseHandlerGreet = "ACK",
     -- Turtle Requests
     responseHandlerTurtleState = "ACK",
     responseHandlerGetAllUpdates = "UPDATELIST",
@@ -351,6 +348,7 @@ ClientResponseHandler.expectedResponseTypes = {
 }
 
 ClientResponseHandler.responseHandlerArguments = {
+    responseHandlerGreet = {"isTurtle"},
     -- Turtle Requests
     responseHandlerTurtleState = {"state"},
     responseHandlerGetAllUpdates = {},
@@ -366,6 +364,7 @@ ClientResponseHandler.responseHandlerArguments = {
 }
 
 function ClientResponseHandler:_init()
+    self.responseHandlerGreet = nil
     -- Turtle Requests
     self.responseHandlerTurtleState = nil
     self.responseHandlerGetAllUpdates = nil
@@ -383,8 +382,8 @@ end
 ClientConnection = CreateClass(Connection)
 
 -- If a new incoming connection is a GREET'ing then return the new connection, else nil
-function ClientConnection.newIncomingConnection(senderID, request, protocol)
-    if protocol ~= protocolName then return nil end
+function ClientConnection.newIncomingConnection(senderID, request, protocolChannel)
+    if protocolChannel ~= protocolName then return nil end
 
     if request and request.type == "GREET" then
         if request.isTurtle == true then
@@ -395,9 +394,10 @@ function ClientConnection.newIncomingConnection(senderID, request, protocol)
     end
 end
 
+function ClientConnection:isTurtle() end
 
-function ClientConnection:isSender(senderID, protocol)
-    return protocol == protocolName and senderID == self.otherID
+function ClientConnection:isSender(senderID, protocolChannel)
+    return protocolChannel == protocolName and senderID == self.otherID
 end
 
 function ClientConnection:handleResponse(clientResponseHandler, request)
@@ -412,6 +412,7 @@ function ClientConnection:handleResponse(clientResponseHandler, request)
     end
 
     local args = {}
+    table.insert(args, self)
     local argNames = ClientResponseHandler.responseHandlerArguments[handlerType]
     for _, argName in ipairs(argNames) do
         table.insert(args, request[argName])
@@ -419,14 +420,20 @@ function ClientConnection:handleResponse(clientResponseHandler, request)
     
     local response = handler(table.unpack(args))
 
-    local expectedResponseType = ClientResponseHandler.expectedResponseTypes[handlerType]  
+    local expectedResponseType = ClientResponseHandler.expectedResponseTypes[handlerType]
+    if response == nil then
+        error("Handler "..handlerType ..
+        "didnt return a response. This handler should return a "..expectedResponseType..
+        " response")
+    end 
+
     if response.type ~= expectedResponseType then
         error("Handler "..handlerType..
         " should return a "..expectedResponseType..
         " response, got a "..response.type)
     end
 
-    protectedSend(self.otherID, response, protocolName)
+    rednet.send(self.otherID, response, protocolName)
 end
 
 function ClientConnection:makeResponseAck()
@@ -468,7 +475,7 @@ function TurtleConnection:wake()
     local request = {
         type = "WAKE"
     }
-    protectedSend(self.otherID, request, protocolName)
+    rednet.send(self.otherID, request, protocolName)
 end
 
 PlayerConnection = CreateClass(ClientConnection)
@@ -490,6 +497,10 @@ function PlayerConnection:makeResponseItemRequestConfirm(success, reason)
     end
     return response
 end
+
+function PlayerConnection:isTurtle() return false end
+
+
 
 --[[
 Requests:
