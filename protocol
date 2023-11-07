@@ -1,8 +1,11 @@
 local protocolName = "aeDeliverProtocol"
 local serverHostName = "aeDeliverServer"
 
+-- TODO: GREET should indicate the device was restarted
+-- TODO: Add support for changeBounds update
+
 -- https://stackoverflow.com/a/67831952
-local function CreateClass(...)
+function CreateClass(...)
     -- "cls" is the new class
     local cls, bases = {}, {...}
     -- copy base class contents into the new class
@@ -128,20 +131,21 @@ function ServerConnection:sendState(state)
     self:waitForAck()
 end
 
-function ServerConnection:sendIdleState()
-    local state = {type = "IDLE"}
+function ServerConnection:sendIdleState(pos)
+    local state = {type = "IDLE", pos=pos}
     self:sendState(state)
 end
 
-function ServerConnection:sendWaitingState()
-    local state = {type = "WAITING"}
+function ServerConnection:sendWaitingState(pos)
+    local state = {type = "WAITING", pos=pos}
     self:sendState(state)
 end
 
 -- Target is one of PLAYER, HOME, PICKUP from Conenction.TurtleMovementTargets
-function ServerConnection:sendMovingState(dest, eta, target)
+function ServerConnection:sendMovingState(pos, dest, eta, target)
     local state = {
         type = "MOVING",
+        pos = pos,
         dest = dest,
         eta = eta,
         target = target,
@@ -219,8 +223,6 @@ function ServerConnection:requestPathingUpdates(
     playerPosCallback,
     areaResetCallback,
     areaBlockCallback,
-    deliverCallback,
-    waitCallback,
     getPlayer
 )
     local request = {
@@ -240,8 +242,8 @@ function ServerConnection:requestPathingUpdates(
         playerPosCallback,
         areaResetCallback,
         areaBlockCallback,
-        deliverCallback,
-        waitCallback
+        nil,
+        nil
     )
 end
 
@@ -442,6 +444,13 @@ function ClientConnection:makeResponseAck()
     }
 end
 
+function ClientConnection:wake()
+    local request = {
+        type = "WAKE"
+    }
+    rednet.send(self.otherID, request, protocolName)
+end
+
 TurtleConnection = CreateClass(ClientConnection)
 
 function TurtleConnection:makeResponseUpdateList(updates)
@@ -451,32 +460,28 @@ function TurtleConnection:makeResponseUpdateList(updates)
     }
 end
 
-function TurtleConnection.makeUpdatePlayerPos(pos)
+function TurtleConnection:makeUpdatePlayerPos(pos)
     return {type = "PLAYERPOS", pos=pos}
 end
 
-function TurtleConnection.makeUpdateAreaReset(corner1, corner2)
+function TurtleConnection:makeUpdateAreaReset(corner1, corner2)
     return {type = "AREARESET", corner1 = corner1, corner2 = corner2}
 end
 
-function TurtleConnection.makeUpdateAreaBlock(corner1, corner2)
+function TurtleConnection:makeUpdateAreaBlock(corner1, corner2)
     return {type = "AREABLOCK", corner1 = corner1, corner2 = corner2}
 end
 
-function TurtleConnection.makeUpdateDeliver(item, amount)
+function TurtleConnection:makeUpdateDeliver(item, amount)
     return {type = "DELIVER", item = item, amount = amount}
 end
 
-function TurtleConnection.makeUpdateWait(duration)
+function TurtleConnection:makeUpdateWait(duration)
     return {type = "WAIT", duration = duration}
 end
 
-function TurtleConnection:wake()
-    local request = {
-        type = "WAKE"
-    }
-    rednet.send(self.otherID, request, protocolName)
-end
+
+function TurtleConnection:isTurtle() return true end
 
 PlayerConnection = CreateClass(ClientConnection)
 
@@ -503,6 +508,8 @@ function PlayerConnection:isTurtle() return false end
 
 
 --[[
+TODO: wait if player goes outside bounding area before or during delivery?
+
 Requests:
     GREET -> ACK
         isTurtle: boolean
@@ -532,7 +539,8 @@ Requests:
     CHANGEBOUNDS -> ACK
         corner1: Vector3
         corner2: Vector3
-    -- Sent by server to turtle?
+
+    -- Sent by server to turtle and players?
     WAKE
 
 

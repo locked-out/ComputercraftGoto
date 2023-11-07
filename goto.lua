@@ -1,10 +1,12 @@
 local mapFileName = ".gotomapdata"
 local configFileName = ".gotoconfig"
 
-local pathFindingTimeout = 20 
+local pathFindingTimeout = 5
 local GPSLocateTimeout = 5 
 
 ------------
+
+os.loadAPI("protocol")
 
 local sensor = peripheral.find("turtlesensorenvironment")
 local modem = peripheral.find("modem")
@@ -221,8 +223,8 @@ end
 
 -- returns stack of movements to reach goal, returns nil on pathfind failure
 -- Only operates with relative positions
--- TODO: Inform user if timeout or unreachable
-function Navigation:aStar(start, startDir, goal)
+-- TODO: Inform user if timeout or unreachable   
+function Navigation:aStar(start, startDir, goal, goodEnoughRadius)
     local visited = {}
     local costs = {}
     local prev = {}
@@ -230,7 +232,7 @@ function Navigation:aStar(start, startDir, goal)
     local startIndex = self:posDirToIndex(start, startDir)
     costs[startIndex] = 0
     prev[startIndex] = nil
-
+ 
     local sToGoal = goal - start
 
     local q = PriorityQueue:new(queueComparison)
@@ -244,13 +246,14 @@ function Navigation:aStar(start, startDir, goal)
         local current = item.pos
         local currentDir = item.dir
 
-
         local index = self:posDirToIndex(current, currentDir)
 
-        if current.x == goal.x and current.y == goal.y and current.z == goal.z then
+        local hereToGoal = goal - current
+        local toGoalDist = math.abs(hereToGoal.x) + math.abs(hereToGoal.y) + math.abs(hereToGoal.z)
+        if toGoalDist <= goodEnoughRadius then
+            goal = current;
             break
         end
-
 
         for i, direction in ipairs(cardinalDirections) do
             local neighbour = current + direction
@@ -327,50 +330,76 @@ function Navigation:aStar(start, startDir, goal)
 end
 
 -- Goto an absoulte position, return false if goal is out of bounds or unreachable, else return true on success
-function Navigation:moveto(goal)
-    goal = goal - self.origin
-    if goal.x < 0 or goal.x >= self.bounds.x then return false end
-    if goal.y < 0 or goal.y >= self.bounds.y then return false end
-    if goal.z < 0 or goal.z >= self.bounds.z then return false end
-
-    local relPos = self.mov.currentPos-self.origin
-    if goal.x == relPos.x and goal.y == relPos.y and goal.z == relPos.z then
-        return true
-    end
-
-    if self:isBlockedRelPos(goal) then return false end
-
+-- interuptFunction should be called during movement to check if the goal or parameters have changed
+function Navigation:moveto(goalFunction, interuptFunction, goodEnoughRadius)
     while true do
-        relPos = self.mov.currentPos-self.origin
-        local steps = self:aStar(relPos, self.mov.facing, goal)
+        local goal = goalFunction()
+        write("Moving to ")
+        print(goal)
+        goal = goalFunction() - self.origin
+        if goal.x < 0 or goal.x >= self.bounds.x then return false end
+        if goal.y < 0 or goal.y >= self.bounds.y then return false end
+        if goal.z < 0 or goal.z >= self.bounds.z then return false end
 
-        if steps == nil then
-            print("Could not find path")
-            return false
-        end
-
-        -- read()
-        local failedStep
-        while not steps:isEmpty() do
-            local step = steps:pop()
-
-            if not self.mov:move(step) then
-                write("Failed moving ")
-                print(step)
-                failedStep = step
-                break
-            end
-        end
-
-        if steps:isEmpty() then
+        local relPos = self.mov.currentPos-self.origin
+        if goal.x == relPos.x and goal.y == relPos.y and goal.z == relPos.z then
             return true
         end
 
-        print("Scanning")
+        local isBlocked = self:isBlockedRelPos(goal)
 
-        self:scan(failedStep)
+        if goodEnoughRadius == 0 and isBlocked then return false end
 
-        print("Finding new path")
+        if not isBlocked then goodEnoughRadius = 0 end
+
+        local nsteps = 0
+
+        while true do
+            relPos = self.mov.currentPos-self.origin
+            local steps = self:aStar(relPos, self.mov.facing, goal, goodEnoughRadius)
+
+            if steps == nil then
+                print("Could not find path")
+                return false
+            end
+
+            local interupt = false
+            local failedStep
+            while not steps:isEmpty() do
+                local step = steps:pop()
+
+                if not self.mov:move(step) then
+                    write("Failed moving ")
+                    print(step)
+                    failedStep = step
+                    break
+                else
+                    nsteps = nsteps+1
+                end
+
+                if nsteps % 5 == 0 then
+                    if interuptFunction() then
+                        interupt = true
+                        break
+                    end
+                end
+            end
+            
+            if interupt then
+                print("Detected changes, recalculating path")
+                break
+            end
+
+            if steps:isEmpty() then
+                return true
+            end
+
+            print("Scanning")
+
+            self:scan(failedStep)
+
+            print("Finding new path")
+        end
     end
 end
 
@@ -581,16 +610,46 @@ DeliveryManager = {
     homeDir = "left",-- string of inventory direction
     fuelPos = nil,   -- vector3 fuel locationg near fuel inventory
     fuelDir = "left",-- string of inventory direction
+    serverConnection = nil,
+    playerPos = nil  -- vector3 of player's position
 }
 
-function DeliveryManager:new(nav, currentPos, facing)
+function DeliveryManager:new(nav, serverConnection)
     local o = {}
     setmetatable(o, self)
     self.__index = self
     self.nav = nav
-    self.currentPos = currentPos or vector.new(0, 0, 0)
-    self.facing = facing or vector.new(1, 0, 0)
+    self.serverConnection = serverConnection
     return o
+end
+
+function DeliveryManager:checkForPathingUpdates(getPlayer)
+    local changes = false
+    
+    local function playerPosCallback(pos) 
+        print("Player pos was updated!")
+        self.playerPos = vector.new(math.floor(pos.x), math.floor(pos.y), math.floor(pos.z))
+        changes = true
+    end
+
+    self.serverConnection:requestPathingUpdates(playerPosCallback, nil, nil, getPlayer) 
+    
+    return changes
+end
+
+function DeliveryManager:getPlayerUpdates() return self:checkForPathingUpdates(true) end
+function DeliveryManager:getPathingOnlyUpdates() return self:checkForPathingUpdates(false) end
+
+function DeliveryManager:getPlayerPos() return self.playerPos end
+
+local function findWirelessModem()
+    for _, name in pairs(peripheral.getNames()) do
+        if peripheral.getType(name) == "modem" and peripheral.call(name, "isWireless") then
+            return name
+        end
+    end
+
+    return nil
 end
 
 local function main()
@@ -604,6 +663,8 @@ local function main()
         print("Could not find an attached modem. This program requires an attached wirless modem. Craft one together with this turtle.")
         return
     end
+
+    rednet.open(findWirelessModem())    
 
     local x,y,z = gps.locate(5)
 
@@ -619,28 +680,38 @@ local function main()
 
     local nav = Navigation:new(mov, lowerCorner, upperCorner-lowerCorner)
 
-
     if fs.exists(mapFileName) then
         nav:loadMap()
     end
 
+    local connection = protocol.ServerConnection.begin(true)
+    local manager = DeliveryManager:new(nav, connection)
+
+    local playerPos
+
+    local function playerPosCallback(pos) manager.playerPos = vector.new(math.floor(pos.x), math.floor(pos.y), math.floor(pos.z)) end
+
+
     while true do
-        write("x: ")
-        x = tonumber(read())
-        write("y: ")
-        y = tonumber(read())
-        write("z: ")
-        z = tonumber(read())
-        local target = vector.new(x,y,z)
+        connection:requestAllUpdates(playerPosCallback, nil, nil, nil, nil)
 
-        -- write("Start: ")
-        -- print(position - nav.origin)
-        -- write("Goal : ")
-        -- print(target - nav.origin)
-    
-        nav:moveto(target)
-        nav:moveto(position)
+        while not manager.playerPos or (manager.playerPos:round()-nav.mov.currentPos):length() < 2 do
+            os.sleep(5)
+            connection:requestAllUpdates(playerPosCallback, nil, nil, nil, nil)
+        end
 
+
+        write("Going to ")
+        print(manager.playerPos)
+        local success = nav:moveto(
+            function () return manager:getPlayerPos() end, 
+            function () return manager:getPlayerUpdates() end,
+            1
+        )
+        if not success then
+            print("Cannot reach")
+            os.sleep(5)
+        end
         nav:saveMap()
     end
 end
