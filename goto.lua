@@ -222,6 +222,7 @@ local function queueComparison(a, b)
 end
 
 -- returns stack of movements to reach goal, returns nil on pathfind failure
+-- also returns the target goal, useful if goodEnoughRadius > 0
 -- Only operates with relative positions
 -- TODO: Inform user if timeout or unreachable   
 function Navigation:aStar(start, startDir, goal, goodEnoughRadius)
@@ -330,9 +331,14 @@ function Navigation:aStar(start, startDir, goal, goodEnoughRadius)
 end
 
 -- Goto an absoulte position, return false if goal is out of bounds or unreachable, else return true on success
--- interuptFunction should be called during movement to check if the goal or parameters have changed
-function Navigation:moveto(goalFunction, interuptFunction, goodEnoughRadius)
+-- interuptFunction is called during movement to check if the goal or parameters have changed
+-- sendMovingStateFunction is called when commencing movement on a new path, and is passed the following arguments:
+--   currentPos: vector
+--   dest: vector of target of the turtle
+--   travelTime: Estimated time in ticks to reach goal
+function Navigation:moveto(goalFunction, interuptFunction, goodEnoughRadius, sendMovingStateFunction)
     while true do
+        -- Return here on pathing update
         local goal = goalFunction()
         write("Moving to ")
         print(goal)
@@ -355,13 +361,18 @@ function Navigation:moveto(goalFunction, interuptFunction, goodEnoughRadius)
         local nsteps = 0
 
         while true do
+            -- Return here on movement failure (unseen obstacle)
             relPos = self.mov.currentPos-self.origin
-            local steps = self:aStar(relPos, self.mov.facing, goal, goodEnoughRadius)
+            local steps, bestReachable = self:aStar(relPos, self.mov.facing, goal, goodEnoughRadius)
 
             if steps == nil then
                 print("Could not find path")
                 return false
             end
+
+            local travelTimeTicks = steps:nItems() * 8 -- 0.4 seconds = 8 ticks 
+            
+            sendMovingStateFunction(self.mov.currentPos, bestReachable, travelTimeTicks)
 
             local interupt = false
             local failedStep
@@ -695,24 +706,39 @@ local function main()
     while true do
         connection:requestAllUpdates(playerPosCallback, nil, nil, nil, nil)
 
-        while not manager.playerPos or (manager.playerPos:round()-nav.mov.currentPos):length() < 2 do
-            os.sleep(5)
-            connection:requestAllUpdates(playerPosCallback, nil, nil, nil, nil)
+        if not manager.playerPos or (manager.playerPos-nav.mov.currentPos):length() < 2 then
+            connection:sendIdleState(nav.mov.currentPos)
+            while not manager.playerPos or (manager.playerPos - nav.mov.currentPos):length() < 2 do
+                os.sleep(5)
+                connection:requestAllUpdates(playerPosCallback, nil, nil, nil, nil)
+            end
         end
 
+
+        local function sendMovingState(currentPos, dest, travelTime)
+            local eta = os.time() + travelTime/1000
+            while eta >= 24 do
+                eta = eta - 24
+            end
+            connection:sendMovingState(currentPos, dest, eta, "PLAYER")
+        end
 
         write("Going to ")
         print(manager.playerPos)
         local success = nav:moveto(
             function () return manager:getPlayerPos() end, 
             function () return manager:getPlayerUpdates() end,
-            1
+            1,
+            sendMovingState
         )
-        if not success then
+
+        if success then
+            nav:saveMap()
+        else 
+            connection:sendStuckState(nav.mov.currentPos, manager.playerPos, "PLAYER")
             print("Cannot reach")
             os.sleep(5)
         end
-        nav:saveMap()
     end
 end
 

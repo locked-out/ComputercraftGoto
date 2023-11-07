@@ -15,9 +15,15 @@ Turtle = protocol.CreateClass()
 function Turtle:_init(connection)
     self.connection = connection
     self.state = nil
+    self.updates = {} 
 end
 
-local sentPosUpdate = false
+Player = protocol.CreateClass()
+function Player:_init(connection)
+    self.connection = connection
+    self.pos = nil
+    self.posSentTo = {} -- A set of IDs of turtles that are aware of the players latest position
+end
 
 local responseHandler = protocol.ClientResponseHandler()
 responseHandler.responseHandlerGreet = function (connection, isTurtle)
@@ -25,23 +31,26 @@ responseHandler.responseHandlerGreet = function (connection, isTurtle)
 end
 
 local function incomingMessage(turtles, players, senderID, message, p)
-     local newConnection = protocol.ClientConnection.newIncomingConnection(senderID, message, p)
+    local newConnection = protocol.ClientConnection.newIncomingConnection(senderID, message, p)
     if newConnection then
         if newConnection:isTurtle() then
             print("Accepted new turtle connection")
-            turtles[senderID] = newConnection
+            turtles[senderID] = Turtle(newConnection)
+            for id, player in pairs(players) do
+                player.posSentTo[senderID] = false
+            end
         else
             print("Accepted new player connection")
-            players[senderID] = newConnection
+            players[senderID] = Player(newConnection)
         end   
     end
 
-    if turtles[senderID] and turtles[senderID]:isSender(senderID, p) then
-        turtles[senderID]:handleResponse(responseHandler, message)
+    if turtles[senderID] and turtles[senderID].connection:isSender(senderID, p) then
+        turtles[senderID].connection:handleResponse(responseHandler, message)
         return
     end
-    if players[senderID] and players[senderID]:isSender(senderID, p) then
-        players[senderID]:handleResponse(responseHandler, message)
+    if players[senderID] and players[senderID].connection:isSender(senderID, p) then
+        players[senderID].connection:handleResponse(responseHandler, message)
         return
     end
 end
@@ -58,28 +67,26 @@ local function main()
     
     protocol.HostServer()
 
-    local turtleConnections = {}
-    local playerConnections = {}
-
-    local playerPos = {}
+    local turtles = {}
+    local players = {}
 
     responseHandler.responseHandlerPlayerPos = function (connection, pos)
         pos = vector.new(pos.x, pos.y, pos.z)
         write("Player at pos ")
         print(pos)
-        playerPos[connection:getOtherID()] = pos
-        sentPosUpdate = false
+        players[connection:getOtherID()].pos = pos
+        players[connection:getOtherID()].posSentTo = {}
         return connection:makeResponseAck()
     end
 
     responseHandler.responseHandlerGetAllUpdates = function (connection)
         local updates = {}
 
-        for id, pos in pairs(playerPos) do
-            if not sentPosUpdate then
-                local posUpdate = connection:makeUpdatePlayerPos(pos)
+        for id, player in pairs(players) do
+            if not player.posSentTo[connection:getOtherID()] then
+                player.posSentTo[connection:getOtherID()] = true
+                local posUpdate = connection:makeUpdatePlayerPos(player.pos)
                 table.insert(updates, posUpdate)
-                sentPosUpdate = true
             end
         end
 
@@ -88,12 +95,18 @@ local function main()
 
     responseHandler.responseHandlerGetPathingUpdates = responseHandler.responseHandlerGetAllUpdates
 
+    responseHandler.responseHandlerTurtleState = function (connection, state)
+        turtles[connection:getOtherID()].state = state
+        return connection:makeResponseAck()
+    end
+
+
     while true do
         local event, r1, r2, r3 = os.pullEvent()
         if event == "rednet_message" then
             write("New "..r3.." message from "..r1..": ")
             print(textutils.serialize(r2))
-            incomingMessage(turtleConnections, playerConnections, r1, r2, r3)
+            incomingMessage(turtles, players, r1, r2, r3)
         end
     end
 end

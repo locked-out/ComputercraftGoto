@@ -154,6 +154,17 @@ function ServerConnection:sendMovingState(pos, dest, eta, target)
     self:sendState(state)
 end
 
+function ServerConnection:sendStuckState(pos, dest, target)
+    local state = {
+        type = "STUCK",
+        pos = pos,
+        dest = dest,
+        target = target,
+    }
+
+    self:sendState(state)
+end
+
 local function handleUpdateList(
     updateList,
     playerPosCallback,
@@ -331,6 +342,7 @@ ClientResponseHandler.requestTypes = {
     ITEMLOOKUP = "responseHandlerItemLookup",
     ITEMREQUEST = "responseHandlerItemRequest",
     CHANGEBOUNDS = "responseHandlerChangeBounds",
+    GETTURTLESTATE = "responseHandlerGetTurtleState",
 }
 
 ClientResponseHandler.expectedResponseTypes = {
@@ -347,6 +359,7 @@ ClientResponseHandler.expectedResponseTypes = {
     responseHandlerItemLookup = "ITEMMATCHES",
     responseHandlerItemRequest = "ACKITEMREQUEST",
     responseHandlerChangeBounds = "ACK",
+    responseHandlerGetTurtleState = "TURTLESTATE",
 }
 
 ClientResponseHandler.responseHandlerArguments = {
@@ -363,6 +376,7 @@ ClientResponseHandler.responseHandlerArguments = {
     responseHandlerItemLookup = {"name"},
     responseHandlerItemRequest = {"item", "amount"},
     responseHandlerChangeBounds = {"corner1", "corner2"},
+    responseHandlerGetTurtleState = {},
 }
 
 function ClientResponseHandler:_init()
@@ -379,6 +393,7 @@ function ClientResponseHandler:_init()
     self.responseHandlerItemLookup = nil
     self.responseHandlerItemRequest = nil
     self.responseHandlerChangeBounds = nil
+    self.responseHandlerGetTurtleState = nil
 end
 
 ClientConnection = CreateClass(Connection)
@@ -425,7 +440,7 @@ function ClientConnection:handleResponse(clientResponseHandler, request)
     local expectedResponseType = ClientResponseHandler.expectedResponseTypes[handlerType]
     if response == nil then
         error("Handler "..handlerType ..
-        "didnt return a response. This handler should return a "..expectedResponseType..
+        " didnt return a response. This handler should return a "..expectedResponseType..
         " response")
     end 
 
@@ -503,6 +518,13 @@ function PlayerConnection:makeResponseItemRequestConfirm(success, reason)
     return response
 end
 
+function PlayerConnection:makeResponseTurtleState(state)
+    return {
+        type = "TURTLESTATE",
+        state = state,
+    }
+end
+
 function PlayerConnection:isTurtle() return false end
 
 
@@ -539,6 +561,7 @@ Requests:
     CHANGEBOUNDS -> ACK
         corner1: Vector3
         corner2: Vector3
+    GETTURTLESTATE -> TURTLESTATE
 
     -- Sent by server to turtle and players?
     WAKE
@@ -559,6 +582,8 @@ Responses:
         success: bool
         reason: string  -- Reason for unsuccessful request
 
+    TURTLESTATE
+        state: State structure
 
     UPDATELIST
         updates: list of possible updates
@@ -582,9 +607,16 @@ Responses:
 
 Turtle States:
     IDLE
+        pos: Vector3
     MOVING
+        pos: Vector3
         dest: Vector3
-        eta: compare with os.clock()
+        eta: subtract os.time() to get remaining travel time in thousands of ticks 
         target: "PLAYER", "HOME", "PICKUP", "FUELDEPOT"
     WAITING - Waiting for items to arrive
+        pos: Vector3
+    STUCK (no path to target)
+        pos: Vector3
+        dest: Vector3
+        target: "PLAYER", "HOME", "PICKUP", "FUELDEPOT"
 ]]--
